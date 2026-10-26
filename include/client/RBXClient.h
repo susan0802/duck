@@ -33,11 +33,12 @@ namespace xeno {
 /// Offsets được tải từ remote server và áp dụng theo version.
 ///
 struct RBXOffsets {
-    uintptr_t dataModel{0};       ///< Offset đến DataModel từ RenderView
-    uintptr_t scriptContext{0};   ///< Offset đến ScriptContext
-    uintptr_t workspace{0};      ///< Offset đến Workspace
-    uintptr_t players{0};        ///< Offset đến Players service
-    // ... thêm offsets khác tùy version
+    std::vector<int64_t> values;
+    std::string inp;
+
+    int64_t get(size_t index, int64_t fallback = 0) const {
+        return (index < values.size()) ? values[index] : fallback;
+    }
 };
 
 /// Trạng thái của RBXClient

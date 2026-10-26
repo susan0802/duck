@@ -130,9 +130,10 @@ XENO_API bool Initialize() {
             }
         }
 
+        // Fallback cuối: dùng embedded offsets (hardcoded từ bản gốc)
         if (!dataRetrieved || offsetsJson.empty()) {
-            spdlog::error("RBXClient data is missing due to corruption or bad endpoint");
-            return false;
+            spdlog::warn("Both endpoints failed. Using embedded offsets data");
+            offsetsJson = R"({"default":"version-9ac8595712b447a7","version-11f155f3450f4c8e":{"offsets":[112,8,120,24,64,136,56,392,296,344,340,352,384,288,168,208,592,504,16,1,0,232,5,65,8,117,-2,8,24,40,56,60,64],"inp":"SMfA/////w=="},"version-9ac8595712b447a7":{"offsets":[104,0,112,24,64,136,56,384,288,336,332,344,376,280,160,208,592,504,16,1,0,232,5,65,8,117,-2,0,16,32,48,52,56],"inp":"SMfA/////w=="}})";
         }
 
         // ---- Bước 2: Khởi tạo Client Manager ----

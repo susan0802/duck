@@ -107,11 +107,15 @@ bool ClientManager::attachClient(uint32_t pid) {
         if (it != offsetsMap_.end()) {
             offsets = it->second;
         } else {
-            // Tìm version mặc định
-            spdlog::warn("Offsets for version \"{}\" not found. Using offsets from "
-                         "default version: {}. Please report this to me (Rizve)",
-                         version, "default");
-            // Dùng offsets mặc định nếu có
+            auto def = offsetsMap_.find("default");
+            if (def != offsetsMap_.end()) {
+                spdlog::warn("Offsets for version \"{}\" not found. Using default offsets",
+                             version);
+                offsets = def->second;
+            } else {
+                spdlog::error("No offsets available for version \"{}\"", version);
+                return false;
+            }
         }
     }
 
@@ -141,16 +145,14 @@ void ClientManager::removeAllClients() {
 // ============================================================================
 // loadOffsets — Parse offsets JSON
 //
-// Format expected:
+// Format gốc từ endpoint:
 // {
-//   "versions": {
-//     "0.620.0.6200589": {
-//       "dataModel": 1234,
-//       "scriptContext": 5678,
-//       ...
-//     },
-//     "default": "0.620.0.6200589"   // alias
-//   }
+//   "default": "version-9ac8595712b447a7",
+//   "version-9ac8595712b447a7": {
+//     "offsets": [104, 0, 112, 24, ...],
+//     "inp": "SMfA/////w=="
+//   },
+//   "version-11f155f3450f4c8e": { ... }
 // }
 // ============================================================================
 
@@ -161,27 +163,36 @@ void ClientManager::loadOffsets(const std::string& offsetsJson) {
         std::lock_guard<std::mutex> lock(mutex_);
         offsetsMap_.clear();
 
-        if (j.contains("versions") && j["versions"].is_object()) {
-            for (auto& [version, data] : j["versions"].items()) {
-                if (data.is_object()) {
-                    RBXOffsets offsets;
-                    if (data.contains("dataModel"))
-                        offsets.dataModel = data["dataModel"].get<uintptr_t>();
-                    if (data.contains("scriptContext"))
-                        offsets.scriptContext = data["scriptContext"].get<uintptr_t>();
-                    if (data.contains("workspace"))
-                        offsets.workspace = data["workspace"].get<uintptr_t>();
-                    if (data.contains("players"))
-                        offsets.players = data["players"].get<uintptr_t>();
+        std::string defaultVersion;
+        if (j.contains("default") && j["default"].is_string()) {
+            defaultVersion = j["default"].get<std::string>();
+        }
 
-                    offsetsMap_[version] = offsets;
+        for (auto& [key, data] : j.items()) {
+            if (key == "default") continue;
+            if (!data.is_object()) continue;
+
+            RBXOffsets offsets;
+
+            if (data.contains("offsets") && data["offsets"].is_array()) {
+                for (auto& val : data["offsets"]) {
+                    offsets.values.push_back(val.get<int64_t>());
                 }
-                else if (data.is_string()) {
-                    // Alias: version "X" points to version "Y"
-                    std::string target = data.get<std::string>();
-                    spdlog::info("Offsets for version \"{}\" points to version \"{}\" "
-                                 "with same offsets", version, target);
-                }
+            }
+
+            if (data.contains("inp") && data["inp"].is_string()) {
+                offsets.inp = data["inp"].get<std::string>();
+            }
+
+            offsetsMap_[key] = std::move(offsets);
+        }
+
+        // "default" alias trỏ đến version cụ thể
+        if (!defaultVersion.empty()) {
+            auto it = offsetsMap_.find(defaultVersion);
+            if (it != offsetsMap_.end()) {
+                offsetsMap_["default"] = it->second;
+                spdlog::info("Default offsets version: {}", defaultVersion);
             }
         }
 
