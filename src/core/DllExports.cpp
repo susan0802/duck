@@ -16,6 +16,7 @@
 #include "server/WebSocketManager.h"
 #include "client/ClientManager.h"
 #include "utils/HttpClient.h"
+#include "utils/Base64.h"
 #include "compression/CompressionEngine.h"
 #include "crypto/CryptoEngine.h"
 
@@ -87,39 +88,52 @@ XENO_API bool Initialize() {
         auto& config = xeno::XenoConfig::instance();
         spdlog::info("Xeno Version: {}", config.version());
 
-        // ---- Bước 1: Tải offsets data ----
-        //
-        // Offsets là các khoảng cách (offset) trong memory của Roblox
-        // để tìm đến DataModel, ScriptContext, v.v.
-        // Chúng thay đổi mỗi khi Roblox update.
-        //
         spdlog::info("Attempting to retrieve RBXClient data...");
         xeno::HttpClient httpClient;
 
-        // Thử endpoint chính
+        std::string offsetsJson;
+        bool dataRetrieved = false;
+
+        // Thử primary endpoint: ep.zst.enc = Base64(Zstd(JSON))
         auto response = httpClient.downloadBinary(config.primaryEndpoint());
-        if (!response.has_value()) {
+        if (response.has_value()) {
+            // Flow: Download → Base64 Decode → Zstd Decompress → JSON
+            std::string responseStr(response->begin(), response->end());
+            auto decoded = xeno::Base64::decode(responseStr);
+
+            if (decoded.has_value()) {
+                auto decompressed = xeno::CompressionEngine::zstdDecompress(decoded.value());
+                if (decompressed.has_value()) {
+                    offsetsJson.assign(decompressed->begin(), decompressed->end());
+                    spdlog::info("Successfully retrieved RBXClient data (Primary)");
+                    dataRetrieved = true;
+                } else {
+                    spdlog::warn("RBXClient data resource decompression failed "
+                                 "(It is likely corrupted). Using secondary endpoint");
+                }
+            } else {
+                spdlog::warn("RBXClient data base64 decode failed. Using secondary endpoint");
+            }
+        } else {
             spdlog::warn("Primary endpoint failed. Trying secondary...");
-            response = httpClient.downloadBinary(config.secondaryEndpoint());
         }
 
-        if (!response.has_value()) {
-            spdlog::error("Failed to retrieve RBXClient data from both endpoints");
+        // Fallback: secondary endpoint trả về plain JSON
+        if (!dataRetrieved) {
+            auto secondary = httpClient.downloadBinary(config.secondaryEndpoint());
+            if (secondary.has_value()) {
+                offsetsJson.assign(secondary->begin(), secondary->end());
+                spdlog::info("Successfully retrieved RBXClient data from endpoint (Secondary)");
+                dataRetrieved = true;
+            } else {
+                spdlog::error("Failed to retrieve RBXClient data from secondary endpoint");
+            }
+        }
+
+        if (!dataRetrieved || offsetsJson.empty()) {
+            spdlog::error("RBXClient data is missing due to corruption or bad endpoint");
             return false;
         }
-
-        // Giải nén data (Zstd compressed, có thể encrypted)
-        //
-        // Flow: Downloaded bytes → Decrypt (AES) → Decompress (Zstd) → JSON
-        //
-        auto decompressed = xeno::CompressionEngine::zstdDecompress(response.value());
-        if (!decompressed.has_value()) {
-            spdlog::error("RBXClient data resource decompression failed");
-            return false;
-        }
-
-        std::string offsetsJson(decompressed->begin(), decompressed->end());
-        spdlog::info("Successfully retrieved RBXClient data from endpoint");
 
         // ---- Bước 2: Khởi tạo Client Manager ----
         g_clientManager = std::make_unique<xeno::ClientManager>();
