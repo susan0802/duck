@@ -107,6 +107,7 @@ if(WIN32)
             Ws2_32       # Winsock (cho networking)
             Crypt32      # Windows crypto API
             Psapi        # Process status API
+            Bcrypt       # BCrypt API (mbedTLS trong ixwebsocket)
     )
 endif()
 
