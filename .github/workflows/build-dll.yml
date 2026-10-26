@@ -16,65 +16,51 @@ jobs:
     - name: Checkout
       uses: actions/checkout@v4
 
-    - name: Setup vcpkg
-      uses: microsoft/setup-vcpkg@v1
-      with:
-        runVcpkgInstall: false
-
     - name: Cache vcpkg packages
       uses: actions/cache@v4
       with:
         path: |
-          ${{ env.VCPKG_INSTALLATION_ROOT }}/installed
-          ${{ env.VCPKG_INSTALLATION_ROOT }}/packages
-        key: vcpkg-${{ runner.os }}-${{ hashFiles('CMakeLists.txt') }}
+          C:/vcpkg/installed
+          C:/vcpkg/packages
+        key: vcpkg-win-${{ hashFiles('CMakeLists.txt') }}
         restore-keys: |
-          vcpkg-${{ runner.os }}-
+          vcpkg-win-
 
     - name: Install dependencies via vcpkg
       run: |
-        vcpkg install openssl:x64-windows
-        vcpkg install curl:x64-windows
-        vcpkg install nlohmann-json:x64-windows
-        vcpkg install spdlog:x64-windows
-        vcpkg install fmt:x64-windows
-        vcpkg install lz4:x64-windows
-        vcpkg install zstd:x64-windows
-        vcpkg install cpp-httplib:x64-windows
-        vcpkg install ixwebsocket:x64-windows
+        vcpkg install openssl:x64-windows curl:x64-windows nlohmann-json:x64-windows spdlog:x64-windows fmt:x64-windows lz4:x64-windows zstd:x64-windows cpp-httplib:x64-windows ixwebsocket:x64-windows
 
     - name: Configure CMake
       run: |
-        cmake -B build -S . `
-          -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake" `
-          -DCMAKE_BUILD_TYPE=Release `
-          -A x64
+        cmake -B build -S . -DCMAKE_TOOLCHAIN_FILE=C:/vcpkg/scripts/buildsystems/vcpkg.cmake -DCMAKE_BUILD_TYPE=Release -A x64
 
     - name: Build
       run: cmake --build build --config Release
 
     - name: List output
       run: |
-        Get-ChildItem -Recurse build/bin/ -ErrorAction SilentlyContinue
-        Get-ChildItem -Recurse build/Release/ -ErrorAction SilentlyContinue
         Get-ChildItem -Recurse build/ -Filter "*.dll" -ErrorAction SilentlyContinue
+        Get-ChildItem -Recurse build/ -Filter "*.lib" -ErrorAction SilentlyContinue
 
     - name: Collect DLL and dependencies
       run: |
         New-Item -ItemType Directory -Force -Path artifact
-        # Copy Xeno.dll
+        # Find and copy Xeno.dll
         $dll = Get-ChildItem -Recurse build/ -Filter "Xeno.dll" | Select-Object -First 1
-        if ($dll) { Copy-Item $dll.FullName artifact/ }
-        # Copy dependency DLLs from vcpkg
-        $installed = "$env:VCPKG_INSTALLATION_ROOT/installed/x64-windows/bin"
+        if ($dll) {
+          Copy-Item $dll.FullName artifact/
+          Write-Host "Found Xeno.dll at $($dll.FullName)"
+        } else {
+          Write-Host "WARNING: Xeno.dll not found in build output"
+          Get-ChildItem -Recurse build/ -Filter "*.dll"
+        }
+        # Copy dependency DLLs from vcpkg installed dir
+        $installed = "C:/vcpkg/installed/x64-windows/bin"
         if (Test-Path $installed) {
-          Copy-Item "$installed/libcrypto-3-x64.dll" artifact/ -ErrorAction SilentlyContinue
-          Copy-Item "$installed/libssl-3-x64.dll" artifact/ -ErrorAction SilentlyContinue
-          Copy-Item "$installed/libcurl.dll" artifact/ -ErrorAction SilentlyContinue
-          Copy-Item "$installed/lz4.dll" artifact/ -ErrorAction SilentlyContinue
-          Copy-Item "$installed/zstd.dll" artifact/ -ErrorAction SilentlyContinue
-          Copy-Item "$installed/fmt.dll" artifact/ -ErrorAction SilentlyContinue
-          Copy-Item "$installed/spdlog.dll" artifact/ -ErrorAction SilentlyContinue
+          Get-ChildItem "$installed/*.dll" | ForEach-Object {
+            Copy-Item $_.FullName artifact/ -ErrorAction SilentlyContinue
+            Write-Host "Copied dependency: $($_.Name)"
+          }
         }
 
     - name: Upload DLL artifact
