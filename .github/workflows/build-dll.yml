@@ -1,0 +1,85 @@
+name: Build Xeno DLL
+
+on:
+  push:
+    branches: [ claude/project-file-check-he1bay, main ]
+  workflow_dispatch:
+
+env:
+  VCPKG_DEFAULT_TRIPLET: x64-windows
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Setup vcpkg
+      uses: microsoft/setup-vcpkg@v1
+      with:
+        runVcpkgInstall: false
+
+    - name: Cache vcpkg packages
+      uses: actions/cache@v4
+      with:
+        path: |
+          ${{ env.VCPKG_INSTALLATION_ROOT }}/installed
+          ${{ env.VCPKG_INSTALLATION_ROOT }}/packages
+        key: vcpkg-${{ runner.os }}-${{ hashFiles('CMakeLists.txt') }}
+        restore-keys: |
+          vcpkg-${{ runner.os }}-
+
+    - name: Install dependencies via vcpkg
+      run: |
+        vcpkg install openssl:x64-windows
+        vcpkg install curl:x64-windows
+        vcpkg install nlohmann-json:x64-windows
+        vcpkg install spdlog:x64-windows
+        vcpkg install fmt:x64-windows
+        vcpkg install lz4:x64-windows
+        vcpkg install zstd:x64-windows
+        vcpkg install cpp-httplib:x64-windows
+        vcpkg install ixwebsocket:x64-windows
+
+    - name: Configure CMake
+      run: |
+        cmake -B build -S . `
+          -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake" `
+          -DCMAKE_BUILD_TYPE=Release `
+          -A x64
+
+    - name: Build
+      run: cmake --build build --config Release
+
+    - name: List output
+      run: |
+        Get-ChildItem -Recurse build/bin/ -ErrorAction SilentlyContinue
+        Get-ChildItem -Recurse build/Release/ -ErrorAction SilentlyContinue
+        Get-ChildItem -Recurse build/ -Filter "*.dll" -ErrorAction SilentlyContinue
+
+    - name: Collect DLL and dependencies
+      run: |
+        New-Item -ItemType Directory -Force -Path artifact
+        # Copy Xeno.dll
+        $dll = Get-ChildItem -Recurse build/ -Filter "Xeno.dll" | Select-Object -First 1
+        if ($dll) { Copy-Item $dll.FullName artifact/ }
+        # Copy dependency DLLs from vcpkg
+        $installed = "$env:VCPKG_INSTALLATION_ROOT/installed/x64-windows/bin"
+        if (Test-Path $installed) {
+          Copy-Item "$installed/libcrypto-3-x64.dll" artifact/ -ErrorAction SilentlyContinue
+          Copy-Item "$installed/libssl-3-x64.dll" artifact/ -ErrorAction SilentlyContinue
+          Copy-Item "$installed/libcurl.dll" artifact/ -ErrorAction SilentlyContinue
+          Copy-Item "$installed/lz4.dll" artifact/ -ErrorAction SilentlyContinue
+          Copy-Item "$installed/zstd.dll" artifact/ -ErrorAction SilentlyContinue
+          Copy-Item "$installed/fmt.dll" artifact/ -ErrorAction SilentlyContinue
+          Copy-Item "$installed/spdlog.dll" artifact/ -ErrorAction SilentlyContinue
+        }
+
+    - name: Upload DLL artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: Xeno-DLL-x64
+        path: artifact/
+        if-no-files-found: warn
