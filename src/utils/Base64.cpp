@@ -69,10 +69,10 @@ static constexpr uint8_t DECODE_TABLE[256] = {
 //   - Dư 2 bytes: output 3 chars + "="
 // ============================================================================
 
-std::string Base64::encode(const void* data, size_t size) {
+std::string Base64::encode(const uint8_t* data, size_t size) {
     if (!data || size == 0) return "";
 
-    auto input = static_cast<const uint8_t*>(data);
+    const uint8_t* input = data;
 
     // Output size: ceil(size/3) * 4
     std::string output;
@@ -117,7 +117,7 @@ std::string Base64::encode(const void* data, size_t size) {
 }
 
 std::string Base64::encode(const std::string& data) {
-    return encode(data.data(), data.size());
+    return encode(reinterpret_cast<const uint8_t*>(data.data()), data.size());
 }
 
 std::string Base64::encode(const std::vector<uint8_t>& data) {
