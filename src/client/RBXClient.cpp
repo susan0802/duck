@@ -24,6 +24,12 @@
 #include <nlohmann/json.hpp>
 #include <filesystem>
 #include <fstream>
+#include <regex>
+#include <sstream>
+
+#ifdef _WIN32
+#include <TlHelp32.h>
+#endif
 
 using json = nlohmann::json;
 
@@ -54,6 +60,23 @@ RBXClient::RBXClient(uint32_t pid, const std::string& version)
     , version_(version)
 {
     spdlog::info("Creating new RBXClient: {}", pid);
+
+#ifdef _WIN32
+    processHandle_ = ProcessManager::openProcess(pid_, PROCESS_ALL_ACCESS);
+    if (processHandle_) {
+        spdlog::info("Created RBXClient instance @{:#x}",
+                     reinterpret_cast<uintptr_t>(processHandle_));
+    } else {
+        DWORD err = GetLastError();
+        if (err == ERROR_ACCESS_DENIED) {
+            spdlog::error("Failed to open the Roblox client process because it is "
+                          "running with administrator privileges. Please run Xeno "
+                          "as administrator or restart Roblox without administrator privileges.");
+        } else {
+            spdlog::error("Failed to open process {}: error {}", pid, err);
+        }
+    }
+#endif
 }
 
 RBXClient::~RBXClient() {
@@ -175,10 +198,24 @@ void RBXClient::closeProcess() {
 
 bool RBXClient::isProcessAlive() const {
 #ifdef _WIN32
-    if (!processHandle_) return false;
-    DWORD exitCode = 0;
-    if (!GetExitCodeProcess(processHandle_, &exitCode)) return false;
-    return exitCode == STILL_ACTIVE;
+    if (processHandle_) {
+        DWORD exitCode = 0;
+        if (!GetExitCodeProcess(processHandle_, &exitCode)) return false;
+        return exitCode == STILL_ACTIVE;
+    }
+    // Fallback: check bằng PID khi chưa có handle
+    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (snap == INVALID_HANDLE_VALUE) return false;
+    PROCESSENTRY32W pe{};
+    pe.dwSize = sizeof(pe);
+    bool found = false;
+    if (Process32FirstW(snap, &pe)) {
+        do {
+            if (pe.th32ProcessID == pid_) { found = true; break; }
+        } while (Process32NextW(snap, &pe));
+    }
+    CloseHandle(snap);
+    return found;
 #else
     return false;
 #endif
@@ -203,34 +240,84 @@ bool RBXClient::findRenderView() {
 
     spdlog::info("Fetching DataModel...");
 
-    // Pattern scan logic (simplified):
-    //
-    // MEMORY_BASIC_INFORMATION memInfo;
-    // uintptr_t addr = 0;
-    //
-    // while (VirtualQueryEx(processHandle_, (LPCVOID)addr, &memInfo, sizeof(memInfo))) {
-    //     if (memInfo.State == MEM_COMMIT &&
-    //         (memInfo.Protect & PAGE_READWRITE) &&
-    //         memInfo.Type == MEM_PRIVATE) {
-    //
-    //         std::vector<uint8_t> buffer(memInfo.RegionSize);
-    //         SIZE_T bytesRead = 0;
-    //         if (ReadProcessMemory(processHandle_, memInfo.BaseAddress,
-    //                               buffer.data(), memInfo.RegionSize, &bytesRead)) {
-    //             // Tìm RenderView pattern trong buffer
-    //             // ...
-    //         }
-    //     }
-    //     addr = (uintptr_t)memInfo.BaseAddress + memInfo.RegionSize;
-    // }
+    // Lấy RenderView address từ Roblox log files
+    // Log chứa dòng: "SurfaceController[_:1]::initialize view(<hex address>)"
+    namespace fs = std::filesystem;
 
-    if (renderView_ == 0) {
-        spdlog::error("Failed to get RenderView");
+    fs::path localAppData = fs::temp_directory_path().parent_path().parent_path();
+    fs::path logsDir = localAppData / "Roblox" / "logs";
+
+    if (!fs::is_directory(logsDir)) {
+        spdlog::error("Roblox logs directory not found: {}", logsDir.string());
         return false;
     }
 
-    spdlog::info("RenderView: {:#x}", renderView_);
-    return true;
+    for (int tries = 5; tries >= 1; --tries) {
+        // Thu thập log files, sắp xếp mới nhất trước
+        std::vector<fs::path> logFiles;
+        for (const auto& entry : fs::directory_iterator(logsDir)) {
+            if (entry.is_regular_file() && entry.path().extension() == ".log")
+                logFiles.push_back(entry.path());
+        }
+
+        if (logFiles.empty()) {
+            spdlog::error("No Roblox log files found");
+            return false;
+        }
+
+        std::sort(logFiles.begin(), logFiles.end(), [](const auto& x, const auto& y) {
+            return fs::last_write_time(x) > fs::last_write_time(y);
+        });
+
+        // Tìm log file đang bị lock (= đang được Roblox sử dụng)
+        std::vector<fs::path> lockedFiles;
+        for (const auto& logPath : logFiles) {
+            // Thử mở exclusive — nếu fail = file đang bị lock bởi Roblox
+            HANDLE hFile = CreateFileW(logPath.c_str(), GENERIC_WRITE, 0,
+                                       nullptr, OPEN_EXISTING, 0, nullptr);
+            if (hFile == INVALID_HANDLE_VALUE) {
+                lockedFiles.push_back(logPath);
+            } else {
+                CloseHandle(hFile);
+            }
+        }
+
+        if (lockedFiles.empty()) {
+            spdlog::warn("No log file is being used by Roblox process");
+            if (tries > 1) { Sleep(1000); continue; }
+            return false;
+        }
+
+        // Đọc log và tìm RenderView address
+        std::regex rgx(R"(\bSurfaceController\[_:1\]::initialize view\((.*?)\))");
+        for (const auto& logPath : lockedFiles) {
+            std::ifstream logFile(logPath);
+            if (!logFile.is_open()) continue;
+
+            std::stringstream buffer;
+            buffer << logFile.rdbuf();
+            std::string content = buffer.str();
+
+            std::smatch match;
+            if (std::regex_search(content, match, rgx) && match.size() > 1) {
+                uintptr_t rvAddr = std::strtoull(match[1].str().c_str(), nullptr, 16);
+
+                // Verify: đọc FakeDataModel từ RenderView+0x118
+                uintptr_t fakeDataModel = 0;
+                if (readMemory(rvAddr + 0x118, &fakeDataModel, sizeof(fakeDataModel))
+                    && fakeDataModel != 0) {
+                    renderView_ = rvAddr;
+                    spdlog::info("RenderView: {:#x}", renderView_);
+                    return true;
+                }
+            }
+        }
+
+        if (tries > 1) Sleep(1000);
+    }
+
+    spdlog::error("Failed to get RenderView");
+    return false;
 #else
     return false;
 #endif
@@ -249,20 +336,16 @@ bool RBXClient::findDataModel() {
 
     spdlog::info("Waiting for DataModel...");
 
-    // Đọc DataModel pointer từ RenderView + offset
-    //
-    // uintptr_t dataModelPtr = 0;
-    // if (!ReadProcessMemory(processHandle_,
-    //                        (LPCVOID)(renderView_ + offsets_.dataModel),
-    //                        &dataModelPtr, sizeof(dataModelPtr), nullptr)) {
-    //     return false;
-    // }
-
-    if (dataModel_ == 0) {
+    // FakeDataModel = *(RenderView + 0x118)
+    // DataModel = FakeDataModel + 0x190
+    uintptr_t fakeDataModel = 0;
+    if (!readMemory(renderView_ + 0x118, &fakeDataModel, sizeof(fakeDataModel))
+        || fakeDataModel == 0) {
         spdlog::error("DataModel address is invalid");
         return false;
     }
 
+    dataModel_ = fakeDataModel + 0x190;
     spdlog::info("DataModel ({}): {:#x}", version_, dataModel_);
     return true;
 #else

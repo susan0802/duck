@@ -14,6 +14,7 @@
 #include <spdlog/spdlog.h>
 #include <nlohmann/json.hpp>
 #include <fstream>
+#include <filesystem>
 
 using json = nlohmann::json;
 
@@ -268,8 +269,22 @@ void ClientManager::scanForClients() {
     // Thêm processes mới
     for (const auto& proc : robloxProcesses) {
         if (clients_.count(proc.pid) == 0) {
-            // Process mới phát hiện
-            auto client = std::make_shared<RBXClient>(proc.pid, proc.exeName);
+            // Lấy Roblox version từ exe path
+            // Path format: ...\Versions\version-xxxxxxxxxxxxxxxx\RobloxPlayerBeta.exe
+            std::string version;
+            auto imagePath = ProcessManager::getProcessImagePath(proc.pid);
+            if (imagePath.has_value()) {
+                std::filesystem::path exePath(imagePath.value());
+                auto parentDir = exePath.parent_path().filename().string();
+                if (parentDir.find("version-") == 0) {
+                    version = parentDir;
+                }
+            }
+            if (version.empty()) {
+                version = proc.exeName;
+            }
+
+            auto client = std::make_shared<RBXClient>(proc.pid, version);
             clients_[proc.pid] = client;
 
             if (onAdded_) {
